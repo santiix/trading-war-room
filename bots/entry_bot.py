@@ -20,15 +20,29 @@ MIN_VALIDATOR_SCORE = float(os.getenv("MIN_VALIDATOR_SCORE", 75))
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-control = supabase.table("bot_control") \
-    .select("*") \
-    .eq("trading_mode", TRADING_MODE) \
-    .limit(1) \
-    .execute()
 
-if control.data and not control.data[0]["is_enabled"]:
-    print("[ENTRY] Trading disabled by Overseer.")
-    return
+def is_trading_enabled():
+    """
+    Checks bot_control table.
+    If Overseer disables trading, Entry Bot stops opening new trades.
+    """
+
+    control = (
+        supabase.table("bot_control")
+        .select("*")
+        .eq("trading_mode", TRADING_MODE)
+        .limit(1)
+        .execute()
+    )
+
+    if control.data and not control.data[0].get("is_enabled", True):
+        reason = control.data[0].get("reason") or "UNKNOWN"
+        status = control.data[0].get("status") or "HALTED"
+        print(f"[ENTRY] Trading disabled by Overseer. Status={status} Reason={reason}")
+        return False
+
+    return True
+
 
 def build_paper_trade(row):
     entry_price = float(row.get("price") or 0)
@@ -37,7 +51,6 @@ def build_paper_trade(row):
         return None
 
     stop_price = round(entry_price * (1 - STOP_PERCENT), 4)
-
     risk_per_share = round(entry_price - stop_price, 4)
 
     if risk_per_share <= 0:
@@ -89,6 +102,9 @@ def run_entry_bot():
     print(f"  Stop:          {STOP_PERCENT * 100}%")
     print("============================================================")
 
+    if not is_trading_enabled():
+        return
+
     response = (
         supabase.table("bot_validations")
         .select("*")
@@ -128,11 +144,10 @@ def run_entry_bot():
 
     print("────────────────────────────────────────────────────")
 
-    result = (
-        supabase.table("bot_trades")
-        .upsert(trades, on_conflict="validation_id")
-        .execute()
-    )
+    supabase.table("bot_trades").upsert(
+        trades,
+        on_conflict="validation_id"
+    ).execute()
 
     print(f"[DB] Upserted {len(trades)} paper trade rows.")
 
