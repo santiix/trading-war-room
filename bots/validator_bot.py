@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from supabase import create_client
 
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
+from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 load_dotenv()
@@ -18,7 +18,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 VALIDATOR_INTERVAL = int(os.getenv("VALIDATOR_INTERVAL", 30))
 
-# Minimum score to be VALIDATED (Ross only wants the best setups)
 MIN_VALIDATOR_SCORE = int(os.getenv("MIN_VALIDATOR_SCORE", 75))
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -26,12 +25,18 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
 ET = ZoneInfo("America/New_York")
 
+# Early credential check
+if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+    raise RuntimeError("❌ Missing ALPACA_API_KEY or ALPACA_SECRET_KEY in .env")
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+data_client = StockHistoricalDataClient(
+    api_key=ALPACA_API_KEY,
+    secret_key=ALPACA_SECRET_KEY
+)
 # ===================================================
 
 def get_premarket_bars(symbol):
-    """Get today's premarket + early session bars for chart strength"""
     try:
         start = datetime.now(ET).replace(hour=4, minute=0, second=0, microsecond=0)
         request = StockBarsRequest(
@@ -63,7 +68,6 @@ def calculate_vwap(bars):
 
 
 def get_daily_emas(symbol):
-    """Check strength vs daily EMAs (Ross prefers stocks above key moving averages)"""
     try:
         request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, limit=30)
         bars = data_client.get_stock_bars(request).data.get(symbol, [])
@@ -99,14 +103,14 @@ def validate_candidate(row):
     spread = float(row.get("spread_pct") or 999)
     tier = row.get("scanner_tier")
 
-    # 1. Price Range ($3.00 - $20.00) - Warrior preference
+    # 1. Price Range ($3.00 - $20.00)
     if 3.00 <= price <= 20.00:
         score += 15
         reasons.append("price in ideal $3-20 range")
     else:
         reasons.append("price outside $3-20")
 
-    # 2. Strong Momentum (30%+ is the new standard from your image)
+    # 2. Strong Momentum (30%+ preferred)
     if percent_change >= 50:
         score += 30
         reasons.append("monster 50%+ move")
@@ -116,10 +120,8 @@ def validate_candidate(row):
     elif percent_change >= 15:
         score += 10
         reasons.append("decent mover")
-    else:
-        reasons.append("weak % change")
 
-    # 3. RVOL & Volume (5x+ is minimum)
+    # 3. RVOL & Volume
     if rel_vol >= 10:
         score += 20
         reasons.append("extreme RVOL")
@@ -131,7 +133,7 @@ def validate_candidate(row):
         score += 10
         reasons.append("heavy volume")
 
-    # 4. Technical Cleanliness (Ross's core chart rules)
+    # 4. Technical Cleanliness (Warrior chart rules)
     premarket_bars = get_premarket_bars(symbol)
     vwap = calculate_vwap(premarket_bars)
     emas = get_daily_emas(symbol)
@@ -139,9 +141,6 @@ def validate_candidate(row):
     if vwap and price >= vwap * 0.98:
         score += 15
         reasons.append("holding above VWAP")
-    else:
-        reasons.append("below VWAP")
-
     if emas["above_20"] and emas["above_50"]:
         score += 10
         reasons.append("strong daily trend")
@@ -152,21 +151,20 @@ def validate_candidate(row):
     # 5. Not too extended from premarket high
     if premarket_bars:
         pm_high = max(float(b.high) for b in premarket_bars)
-        if price <= pm_high * 1.08:          # not too extended
+        if price <= pm_high * 1.08:
             score += 15
             reasons.append("clean setup - not extended")
         else:
             reasons.append("too extended from PM high")
 
-    # 6. Scanner Tier + News (already filtered by Scanner)
+    # 6. Scanner Tier
     if tier == "A_SETUP":
         score += 10
-        reasons.append("A_SETUP + news catalyst")
+        reasons.append("A_SETUP + news")
 
-    # Final decision
     status = "VALIDATED" if score >= MIN_VALIDATOR_SCORE else "REJECTED_BY_VALIDATOR"
 
-    print(f"[VALIDATOR] {symbol} → {status} | Score: {score}/100 | {', '.join(reasons[:4])}...")
+    print(f"[VALIDATOR] {symbol} → {status} | Score: {score}/100")
 
     return {
         "watchlist_id": row["id"],
@@ -188,7 +186,7 @@ def validate_candidate(row):
 def run_validator():
     print("============================================================")
     print("  Trading War Room — VALIDATOR BOT (100% Warrior Trading)")
-    print(f"  Mode: {TRADING_MODE} | Min Score for VALIDATED: {MIN_VALIDATOR_SCORE}")
+    print(f"  Mode: {TRADING_MODE} | Min Score: {MIN_VALIDATOR_SCORE}")
     print("============================================================")
 
     response = (
@@ -213,7 +211,7 @@ def run_validator():
 
 
 def main():
-    print("🚀 Warrior Trading Validator Bot started (updated with latest criteria)\n")
+    print("🚀 Warrior Trading Validator Bot started\n")
     while True:
         try:
             run_validator()
