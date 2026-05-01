@@ -12,18 +12,11 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 def get_market_movers():
-    """
-    MVP placeholder scanner.
-    Later we will replace/expand this with Polygon, Alpaca snapshots,
-    Benzinga/news, float data, and true RVOL.
-    """
-
     url = "https://data.alpaca.markets/v2/stocks/snapshots"
 
     headers = {
@@ -31,7 +24,6 @@ def get_market_movers():
         "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
     }
 
-    # Starter watchlist for testing. Later this becomes dynamic universe scanning.
     symbols = ["AAPL", "TSLA", "NVDA", "AMD", "PLTR", "SOFI", "MARA", "RIOT"]
 
     response = requests.get(
@@ -54,7 +46,6 @@ def get_market_movers():
         prev_bar = snap.get("prevDailyBar") or {}
 
         price = latest_trade.get("p")
-        open_price = daily_bar.get("o")
         prev_close = prev_bar.get("c")
         volume = daily_bar.get("v", 0)
 
@@ -64,23 +55,47 @@ def get_market_movers():
         percent_change = ((price - prev_close) / prev_close) * 100
 
         score = 0
+        reasons = []
 
-        # Strategy-inspired filters
-        if 1 <= price <= 20:
+        # --- CORE STRATEGY FILTER ---
+        price_ok = 1 <= price <= 20
+        momentum_ok = percent_change >= 10
+        volume_ok = volume >= 1_000_000
+
+        if price_ok:
             score += 25
+            reasons.append("price_1_20")
+        else:
+            reasons.append("price_outside_range")
 
         if percent_change >= 10:
             score += 30
+            reasons.append("strong_momentum")
         elif percent_change >= 5:
             score += 15
+            reasons.append("moderate_momentum")
+        else:
+            reasons.append("weak_momentum")
 
         if volume >= 1_000_000:
             score += 20
+            reasons.append("high_volume")
         elif volume >= 250_000:
             score += 10
+            reasons.append("moderate_volume")
+        else:
+            reasons.append("low_volume")
 
-        # Placeholder until we add real RVOL/news/float
-        score += 5
+        # --- CORE FILTER MATCH ---
+        passed_core_filter = price_ok and momentum_ok and volume_ok
+
+        # --- CLASSIFICATION ---
+        if passed_core_filter:
+            scanner_tier = "A_SETUP"
+        elif score >= 50:
+            scanner_tier = "WATCH"
+        else:
+            scanner_tier = "REJECT"
 
         results.append({
             "symbol": symbol,
@@ -88,6 +103,9 @@ def get_market_movers():
             "percent_change": round(percent_change, 2),
             "volume": volume,
             "score": score,
+            "scanner_tier": scanner_tier,
+            "reason": ",".join(reasons),
+            "passed_core_filter": passed_core_filter,
             "trading_mode": TRADING_MODE,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
@@ -101,8 +119,11 @@ def save_watchlist(rows):
         print("No scanner results.")
         return
 
-    result = supabase.table("bot_watchlist").insert(rows).execute()
-    print(f"Saved {len(rows)} rows to Supabase.")
+    try:
+        supabase.table("bot_watchlist").insert(rows).execute()
+        print(f"Saved {len(rows)} rows to Supabase.")
+    except Exception as e:
+        print("Supabase insert error:", str(e))
 
 
 def main():
@@ -113,12 +134,24 @@ def main():
     while True:
         try:
             movers = get_market_movers()
-            print("Top scanner results:", movers)
+
+            print("\n===== SCANNER OUTPUT =====")
+            for m in movers:
+                print(
+                    f"{m['symbol']} | {m['scanner_tier']} | "
+                    f"{m['percent_change']}% | vol:{m['volume']} | score:{m['score']}"
+                )
+
             save_watchlist(movers)
+
         except Exception as e:
             print("Worker error:", str(e))
 
         time.sleep(SCAN_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
