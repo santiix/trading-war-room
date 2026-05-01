@@ -69,9 +69,11 @@ def get_tradable_symbols():
 
         if not symbol:
             continue
-if symbol.endswith("U") or symbol.endswith("W") or symbol.endswith("R"):
-    continue
-    
+
+        # 🔥 FILTER BAD SYMBOL TYPES (FIXED LOCATION)
+        if symbol.endswith("U") or symbol.endswith("W") or symbol.endswith("R"):
+            continue
+
         if "/" in symbol or "." in symbol or "-" in symbol:
             continue
 
