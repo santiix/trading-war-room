@@ -69,7 +69,9 @@ def get_tradable_symbols():
 
         if not symbol:
             continue
-
+if symbol.endswith("U") or symbol.endswith("W") or symbol.endswith("R"):
+    continue
+    
         if "/" in symbol or "." in symbol or "-" in symbol:
             continue
 
@@ -205,8 +207,7 @@ elif score >= 55 and volume >= 250_000:
     scanner_tier = "WATCH"
 else:
     scanner_tier = "REJECT"
-    else:
-        scanner_tier = "REJECT"
+
 
     return {
         "symbol": symbol,
@@ -241,8 +242,7 @@ def get_market_movers():
         if classified["scanner_tier"] in ["A_SETUP", "WATCH"]:
             results.append(classified)
             
-if symbol.endswith("U") or symbol.endswith("W") or symbol.endswith("R"):
-    continue
+
 
     results.sort(
         key=lambda x: (
