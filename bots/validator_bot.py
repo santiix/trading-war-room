@@ -11,14 +11,14 @@ from alpaca.data.timeframe import TimeFrame
 
 load_dotenv()
 
-# ====================== CONFIG ======================
+# ====================== WARRIOR TRADING CONFIG ======================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 VALIDATOR_INTERVAL = int(os.getenv("VALIDATOR_INTERVAL", 30))
 
-# Warrior minimum score to be VALIDATED
+# Minimum score to be VALIDATED (Ross only wants the best setups)
 MIN_VALIDATOR_SCORE = int(os.getenv("MIN_VALIDATOR_SCORE", 75))
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -31,7 +31,7 @@ data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 # ===================================================
 
 def get_premarket_bars(symbol):
-    """Get today's premarket bars for chart strength"""
+    """Get today's premarket + early session bars for chart strength"""
     try:
         start = datetime.now(ET).replace(hour=4, minute=0, second=0, microsecond=0)
         request = StockBarsRequest(
@@ -63,29 +63,24 @@ def calculate_vwap(bars):
 
 
 def get_daily_emas(symbol):
-    """Simple check if price is above key daily EMAs"""
+    """Check strength vs daily EMAs (Ross prefers stocks above key moving averages)"""
     try:
-        request = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Day,
-            limit=30
-        )
+        request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, limit=30)
         bars = data_client.get_stock_bars(request).data.get(symbol, [])
         if len(bars) < 20:
             return {"above_20": False, "above_50": False, "above_200": False}
 
         closes = [float(b.close) for b in bars]
-        current_price = closes[-1]
+        price = closes[-1]
 
-        # Very simple EMA approximation for scoring
         ema20 = sum(closes[-20:]) / 20
         ema50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else ema20
         ema200 = sum(closes) / len(closes) if len(closes) >= 200 else ema50
 
         return {
-            "above_20": current_price > ema20,
-            "above_50": current_price > ema50,
-            "above_200": current_price > ema200,
+            "above_20": price > ema20,
+            "above_50": price > ema50,
+            "above_200": price > ema200,
         }
     except Exception as e:
         print(f"[EMA ERROR] {symbol}: {e}")
@@ -97,25 +92,34 @@ def validate_candidate(row):
     score = 0
     reasons = []
 
-    # Base from scanner
+    price = float(row.get("price") or 0)
     percent_change = float(row.get("percent_change") or 0)
     rel_vol = float(row.get("rel_vol") or 0)
     volume = int(row.get("volume") or 0)
     spread = float(row.get("spread_pct") or 999)
     tier = row.get("scanner_tier")
 
-    # 1. Momentum (Ross loves big movers)
-    if percent_change >= 30:
-        score += 25
-        reasons.append("monster % change")
-    elif percent_change >= 20:
-        score += 20
-        reasons.append("strong % change")
-    elif percent_change >= 10:
-        score += 10
-        reasons.append("ok % change")
+    # 1. Price Range ($3.00 - $20.00) - Warrior preference
+    if 3.00 <= price <= 20.00:
+        score += 15
+        reasons.append("price in ideal $3-20 range")
+    else:
+        reasons.append("price outside $3-20")
 
-    # 2. RVOL & Volume
+    # 2. Strong Momentum (30%+ is the new standard from your image)
+    if percent_change >= 50:
+        score += 30
+        reasons.append("monster 50%+ move")
+    elif percent_change >= 30:
+        score += 25
+        reasons.append("strong 30%+ move")
+    elif percent_change >= 15:
+        score += 10
+        reasons.append("decent mover")
+    else:
+        reasons.append("weak % change")
+
+    # 3. RVOL & Volume (5x+ is minimum)
     if rel_vol >= 10:
         score += 20
         reasons.append("extreme RVOL")
@@ -124,17 +128,17 @@ def validate_candidate(row):
         reasons.append("strong RVOL")
 
     if volume >= 2_000_000:
-        score += 15
+        score += 10
         reasons.append("heavy volume")
 
-    # 3. Technical Cleanliness (Warrior core)
+    # 4. Technical Cleanliness (Ross's core chart rules)
     premarket_bars = get_premarket_bars(symbol)
-    vwap = calculate_vwap(premarket_bars + get_premarket_bars(symbol))  # full day for accuracy
+    vwap = calculate_vwap(premarket_bars)
     emas = get_daily_emas(symbol)
 
-    if vwap and float(row.get("price", 0)) >= vwap * 0.98:
+    if vwap and price >= vwap * 0.98:
         score += 15
-        reasons.append("holding VWAP")
+        reasons.append("holding above VWAP")
     else:
         reasons.append("below VWAP")
 
@@ -145,25 +149,24 @@ def validate_candidate(row):
         score += 5
         reasons.append("above 200 EMA")
 
-    # 4. Not too extended / clean setup
+    # 5. Not too extended from premarket high
     if premarket_bars:
         pm_high = max(float(b.high) for b in premarket_bars)
-        price = float(row.get("price", 0))
-        if price <= pm_high * 1.08:   # not too extended
+        if price <= pm_high * 1.08:          # not too extended
             score += 15
-            reasons.append("not extended")
+            reasons.append("clean setup - not extended")
         else:
-            reasons.append("too extended")
+            reasons.append("too extended from PM high")
 
-    # 5. Scanner Tier & News (already filtered)
+    # 6. Scanner Tier + News (already filtered by Scanner)
     if tier == "A_SETUP":
         score += 10
-        reasons.append("A_SETUP + news")
+        reasons.append("A_SETUP + news catalyst")
 
-    # Final status
+    # Final decision
     status = "VALIDATED" if score >= MIN_VALIDATOR_SCORE else "REJECTED_BY_VALIDATOR"
 
-    print(f"[VALIDATOR] {symbol} → {status} | Score: {score}/100")
+    print(f"[VALIDATOR] {symbol} → {status} | Score: {score}/100 | {', '.join(reasons[:4])}...")
 
     return {
         "watchlist_id": row["id"],
@@ -171,7 +174,7 @@ def validate_candidate(row):
         "validator_status": status,
         "validator_score": score,
         "reason": " | ".join(reasons),
-        "price": row.get("price"),
+        "price": price,
         "percent_change": percent_change,
         "volume": volume,
         "rel_vol": rel_vol,
@@ -185,7 +188,7 @@ def validate_candidate(row):
 def run_validator():
     print("============================================================")
     print("  Trading War Room — VALIDATOR BOT (100% Warrior Trading)")
-    print(f"  Mode: {TRADING_MODE} | Min Score: {MIN_VALIDATOR_SCORE}")
+    print(f"  Mode: {TRADING_MODE} | Min Score for VALIDATED: {MIN_VALIDATOR_SCORE}")
     print("============================================================")
 
     response = (
@@ -199,23 +202,18 @@ def run_validator():
     )
 
     rows = response.data or []
-
     if not rows:
         print("[VALIDATOR] No candidates to validate.")
         return
 
     results = [validate_candidate(r) for r in rows]
 
-    # Save to bot_validations
-    supabase.table("bot_validations") \
-        .upsert(results, on_conflict="watchlist_id") \
-        .execute()
-
+    supabase.table("bot_validations").upsert(results, on_conflict="watchlist_id").execute()
     print(f"[DB] Saved {len(results)} validation rows.")
 
 
 def main():
-    print("🚀 Warrior Trading Validator Bot started\n")
+    print("🚀 Warrior Trading Validator Bot started (updated with latest criteria)\n")
     while True:
         try:
             run_validator()
