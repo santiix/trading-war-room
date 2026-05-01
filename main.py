@@ -201,8 +201,10 @@ def classify_stock(symbol, snap):
 
     if passed_core_filter and score >= 75:
         scanner_tier = "A_SETUP"
-    elif score >= 55:
-        scanner_tier = "WATCH"
+elif score >= 55 and volume >= 250_000:
+    scanner_tier = "WATCH"
+else:
+    scanner_tier = "REJECT"
     else:
         scanner_tier = "REJECT"
 
@@ -238,6 +240,9 @@ def get_market_movers():
 
         if classified["scanner_tier"] in ["A_SETUP", "WATCH"]:
             results.append(classified)
+            
+if symbol.endswith("U") or symbol.endswith("W") or symbol.endswith("R"):
+    continue
 
     results.sort(
         key=lambda x: (
