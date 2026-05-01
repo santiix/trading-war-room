@@ -12,6 +12,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
 ALPACA_TRADING_BASE_URL = os.getenv(
     "ALPACA_TRADING_BASE_URL",
     "https://paper-api.alpaca.markets"
@@ -21,6 +22,7 @@ ALPACA_DATA_BASE_URL = os.getenv(
     "ALPACA_DATA_BASE_URL",
     "https://data.alpaca.markets"
 ).rstrip("/")
+
 MAX_SYMBOLS_TO_SCAN = int(os.getenv("MAX_SYMBOLS_TO_SCAN", "800"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
 
@@ -35,12 +37,7 @@ def alpaca_headers():
 
 
 def get_tradable_symbols():
-    """
-    Pull active tradable US equities from Alpaca.
-    This is our scan universe.
-    """
-
-    url = f"{ALPACA_BASE_URL}/v2/assets"
+    url = f"{ALPACA_TRADING_BASE_URL}/v2/assets"
 
     params = {
         "status": "active",
@@ -56,10 +53,10 @@ def get_tradable_symbols():
 
     if response.status_code != 200:
         print("Alpaca assets error:", response.status_code, response.text)
+        print("Assets URL used:", url)
         return []
 
     assets = response.json()
-
     symbols = []
 
     allowed_exchanges = {"NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"}
@@ -73,7 +70,6 @@ def get_tradable_symbols():
         if not symbol:
             continue
 
-        # Avoid weird symbols/classes for MVP
         if "/" in symbol or "." in symbol or "-" in symbol:
             continue
 
@@ -89,7 +85,6 @@ def get_tradable_symbols():
         symbols.append(symbol)
 
     symbols = sorted(list(set(symbols)))
-
     print(f"Tradable scan universe loaded: {len(symbols)} symbols")
 
     return symbols[:MAX_SYMBOLS_TO_SCAN]
@@ -101,13 +96,8 @@ def chunk_list(items, size):
 
 
 def get_snapshots_for_symbols(symbols):
-    """
-    Pull snapshot data in batches.
-    """
-
     all_snapshots = {}
-
-    url = "https://data.alpaca.markets/v2/stocks/snapshots"
+    url = f"{ALPACA_DATA_BASE_URL}/v2/stocks/snapshots"
 
     for batch in chunk_list(symbols, BATCH_SIZE):
         try:
@@ -120,6 +110,7 @@ def get_snapshots_for_symbols(symbols):
 
             if response.status_code != 200:
                 print("Alpaca snapshot error:", response.status_code, response.text[:500])
+                print("Snapshot URL used:", url)
                 continue
 
             data = response.json() or {}
@@ -151,7 +142,6 @@ def classify_stock(symbol, snap):
 
     percent_change = ((price - prev_close) / prev_close) * 100
 
-    spread = None
     spread_pct = None
 
     if bid and ask and ask > bid:
@@ -238,15 +228,14 @@ def get_market_movers():
         return []
 
     snapshots = get_snapshots_for_symbols(symbols)
-
     results = []
 
     for symbol, snap in snapshots.items():
         classified = classify_stock(symbol, snap)
+
         if not classified:
             continue
 
-        # Keep only meaningful candidates for storage
         if classified["scanner_tier"] in ["A_SETUP", "WATCH"]:
             results.append(classified)
 
@@ -280,6 +269,8 @@ def main():
     print(f"Mode: {TRADING_MODE}")
     print(f"Scan interval: {SCAN_INTERVAL}s")
     print(f"Max symbols scanned: {MAX_SYMBOLS_TO_SCAN}")
+    print(f"Trading API: {ALPACA_TRADING_BASE_URL}")
+    print(f"Data API: {ALPACA_DATA_BASE_URL}")
 
     while True:
         try:
