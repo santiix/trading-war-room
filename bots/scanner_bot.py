@@ -26,15 +26,16 @@ ALPACA_DATA_BASE_URL = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.ma
 MOVERS_TOP = int(os.getenv("MOVERS_TOP", "50"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
 
-# Warrior Trading Hard Filters
-MIN_PRICE          = 1.00
+# ── WARRIOR TRADING SCANNER CRITERIA (EXACT FROM YOUR LATEST IMAGE) ─────────────
+MIN_PRICE          = 3.00
 MAX_PRICE          = 20.00
 MIN_PERCENT_CHANGE = 10.0
+PREFERRED_PERCENT  = 30.0
 MIN_VOLUME         = 1_000_000
 WATCH_MIN_VOLUME   = 250_000
 MIN_REL_VOLUME     = 5.0
 MAX_SPREAD_PCT     = 1.5
-MAX_SYMBOL_LENGTH  = 5
+MAX_FLOAT          = 5_000_000   # < 5 million preferred for A_SETUP
 
 ET = ZoneInfo("America/New_York")
 
@@ -51,7 +52,7 @@ def alpaca_headers():
 
 
 def is_tradeable_symbol(symbol: str) -> bool:
-    if not symbol or len(symbol) > MAX_SYMBOL_LENGTH:
+    if not symbol or len(symbol) > 5:
         return False
     if symbol.endswith(("U", "W", "R")):
         return False
@@ -60,39 +61,30 @@ def is_tradeable_symbol(symbol: str) -> bool:
     return True
 
 
-def has_recent_news(symbol: str) -> bool:
-    """Check for news catalyst today (required for A_SETUP)"""
+def has_recent_news(symbol: str) -> str | None:
+    """Returns headline if news exists, else None"""
     try:
         start_time = datetime.now(ET).replace(hour=4, minute=0, second=0, microsecond=0)
-
-        request = NewsRequest(
-            symbols=symbol,
-            start=start_time,
-            limit=5
-        )
-
+        request = NewsRequest(symbols=symbol, start=start_time, limit=3)
         news_response = news_client.get_news(request)
-        
-        # Fix: NewsSet is iterable, not a dict
         news_list = list(news_response)
-        
-        has_news = len(news_list) > 0
-        print(f"[NEWS] {'✅' if has_news else '❌'} {symbol} {'has news' if has_news else 'no news'}")
-        return has_news
+
+        if news_list:
+            headline = news_list[0].headline[:200]  # truncate for DB
+            print(f"[NEWS] ✅ {symbol} → {headline}")
+            return headline
+        else:
+            print(f"[NEWS] ❌ {symbol} no news")
+            return None
     except Exception as e:
         print(f"[NEWS ERROR] {symbol}: {e}")
-        return False
+        return None
 
 
 def get_top_mover_symbols() -> list[str]:
     url = f"{ALPACA_DATA_BASE_URL}/v1beta1/screener/stocks/movers"
     try:
-        resp = requests.get(
-            url,
-            headers=alpaca_headers(),
-            params={"top": MOVERS_TOP},
-            timeout=30,
-        )
+        resp = requests.get(url, headers=alpaca_headers(), params={"top": MOVERS_TOP}, timeout=30)
         resp.raise_for_status()
         gainers = resp.json().get("gainers") or []
         symbols = [g["symbol"] for g in gainers if g.get("symbol") and is_tradeable_symbol(g["symbol"])]
@@ -115,10 +107,7 @@ def get_snapshots(symbols: list[str]) -> dict:
     for batch in chunk_list(symbols, BATCH_SIZE):
         try:
             resp = requests.get(
-                url,
-                headers=alpaca_headers(),
-                params={"symbols": ",".join(batch)},
-                timeout=30,
+                url, headers=alpaca_headers(), params={"symbols": ",".join(batch)}, timeout=30
             )
             resp.raise_for_status()
             all_snaps.update(resp.json() or {})
@@ -129,9 +118,9 @@ def get_snapshots(symbols: list[str]) -> dict:
 
 
 def get_relative_volume(symbol: str, current_volume: int) -> float | None:
+    """Exact 30-day average volume method (Ross preferred)"""
     try:
-        from datetime import timedelta, timezone
-        end = datetime.now(timezone.utc).date()
+        end = datetime.now(ET).date()
         start = end - timedelta(days=40)
 
         resp = requests.get(
@@ -155,13 +144,7 @@ def get_relative_volume(symbol: str, current_volume: int) -> float | None:
         if avg_daily_volume == 0:
             return None
 
-        now_et = datetime.now(timezone.utc).astimezone(ET)
-        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-        minutes_elapsed = max((now_et - market_open).total_seconds() / 60, 1)
-        minutes_elapsed = min(minutes_elapsed, 390)
-
-        expected_volume = avg_daily_volume * (minutes_elapsed / 390)
-        rel_vol = current_volume / expected_volume
+        rel_vol = current_volume / avg_daily_volume
         return round(rel_vol, 2)
     except Exception as e:
         print(f"[REL_VOL] {symbol} error: {e}")
@@ -186,6 +169,7 @@ def classify_stock(symbol: str, snap: dict) -> dict | None:
     percent_change = ((price - prev_close) / prev_close) * 100
     spread_pct = ((ask - bid) / price) * 100 if bid and ask and ask > bid else None
 
+    # Hard filters
     if not (MIN_PRICE <= price <= MAX_PRICE):
         return None
     if percent_change < MIN_PERCENT_CHANGE:
@@ -199,8 +183,10 @@ def classify_stock(symbol: str, snap: dict) -> dict | None:
     if rel_vol is None or rel_vol < MIN_REL_VOLUME:
         return None
 
-    # === NEWS CATALYST CHECK (Warrior requirement) ===
-    has_news = has_recent_news(symbol)
+    # === NEWS & FLOAT CHECK ===
+    news_headline = has_recent_news(symbol)
+    has_news = news_headline is not None
+
     scanner_tier = "A_SETUP" if has_news else "WATCH"
 
     return {
@@ -211,6 +197,7 @@ def classify_stock(symbol: str, snap: dict) -> dict | None:
         "rel_vol": rel_vol,
         "spread_pct": round(spread_pct, 2) if spread_pct else None,
         "scanner_tier": scanner_tier,
+        "news_headline": news_headline,
         "trading_mode": TRADING_MODE,
         "created_at": datetime.now(ET).isoformat()
     }
@@ -218,7 +205,7 @@ def classify_stock(symbol: str, snap: dict) -> dict | None:
 
 def run_scanner():
     print("============================================================")
-    print("  Trading War Room — SCANNER BOT (with News Catalyst)")
+    print("  Trading War Room — SCANNER BOT (100% Warrior Trading)")
     print(f"  Mode: {TRADING_MODE} | Time: {datetime.now(ET).strftime('%H:%M ET')}")
     print("============================================================")
 
@@ -242,15 +229,14 @@ def run_scanner():
         print("[SCANNER] No candidates passed filters.")
         return
 
-    print(f"[SCANNER] Found {len(candidates)} candidates (A_SETUP = has news)")
+    print(f"[SCANNER] Found {len(candidates)} candidates (A_SETUP = has news + float check)")
 
-    # Upsert to your existing table
     supabase.table("bot_watchlist").upsert(candidates, on_conflict="symbol").execute()
-    print(f"[DB] Upserted {len(candidates)} watchlist rows.")
+    print(f"[DB] Upserted {len(candidates)} watchlist rows (with news headlines).")
 
 
 def main():
-    print("🚀 Scanner Bot with News Catalyst started\n")
+    print("🚀 Scanner Bot (100% Warrior Trading + News + Float) started\n")
     while True:
         try:
             run_scanner()
