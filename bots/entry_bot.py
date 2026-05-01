@@ -20,6 +20,15 @@ MIN_VALIDATOR_SCORE = float(os.getenv("MIN_VALIDATOR_SCORE", 75))
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+control = supabase.table("bot_control") \
+    .select("*") \
+    .eq("trading_mode", TRADING_MODE) \
+    .limit(1) \
+    .execute()
+
+if control.data and not control.data[0]["is_enabled"]:
+    print("[ENTRY] Trading disabled by Overseer.")
+    return
 
 def build_paper_trade(row):
     entry_price = float(row.get("price") or 0)
