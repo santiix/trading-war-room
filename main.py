@@ -210,9 +210,9 @@ def classify_stock(symbol, snap):
         and volume >= 500_000
         and percent_change >= 10
         and spread_ok
-):
+    ):
         scanner_tier = "WATCH"
-else:
+    else:
         scanner_tier = "REJECT"
 
 
