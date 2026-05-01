@@ -106,7 +106,9 @@ def run_validator():
         print(f"{r['symbol']} | {r['validator_status']} | score={r['validator_score']} | {r['reason']}")
     print("────────────────────────────────────────────────────")
 
-    supabase.table("bot_validations").insert(results).execute()
+    supabase.table("bot_validations") \
+        .upsert(results, on_conflict="watchlist_id") \
+        .execute()
 
     print(f"[DB] Saved {len(results)} validation rows.")
 
