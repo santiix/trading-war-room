@@ -4,7 +4,7 @@ import requests
 from datetime import datetime, timezone
 from supabase import create_client, Client
 
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "120"))
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -13,18 +13,13 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
-ALPACA_TRADING_BASE_URL = os.getenv(
-    "ALPACA_TRADING_BASE_URL",
-    "https://paper-api.alpaca.markets"
-).rstrip("/")
-
 ALPACA_DATA_BASE_URL = os.getenv(
     "ALPACA_DATA_BASE_URL",
     "https://data.alpaca.markets"
 ).rstrip("/")
 
-MAX_SYMBOLS_TO_SCAN = int(os.getenv("MAX_SYMBOLS_TO_SCAN", "800"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
+MOVERS_TOP = int(os.getenv("MOVERS_TOP", "50"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
@@ -36,62 +31,55 @@ def alpaca_headers():
     }
 
 
-def get_tradable_symbols():
-    url = f"{ALPACA_TRADING_BASE_URL}/v2/assets"
+def get_top_mover_symbols():
+    """
+    Uses Alpaca's real top movers endpoint.
+    This replaces brute-force scanning thousands of tickers.
+    """
 
-    params = {
-        "status": "active",
-        "asset_class": "us_equity",
-    }
+    url = f"{ALPACA_DATA_BASE_URL}/v1beta1/screener/stocks/movers"
 
-    response = requests.get(
-        url,
-        headers=alpaca_headers(),
-        params=params,
-        timeout=30,
-    )
+    try:
+        response = requests.get(
+            url,
+            headers=alpaca_headers(),
+            params={"top": MOVERS_TOP},
+            timeout=30,
+        )
 
-    if response.status_code != 200:
-        print("Alpaca assets error:", response.status_code, response.text)
-        print("Assets URL used:", url)
+        if response.status_code != 200:
+            print("Alpaca movers error:", response.status_code, response.text[:500])
+            print("Movers URL used:", url)
+            return []
+
+        data = response.json() or {}
+
+        gainers = data.get("gainers") or []
+        symbols = []
+
+        for item in gainers:
+            symbol = item.get("symbol")
+
+            if not symbol:
+                continue
+
+            # Avoid SPAC units/warrants/rights and odd tickers
+            if symbol.endswith("U") or symbol.endswith("W") or symbol.endswith("R"):
+                continue
+
+            if "/" in symbol or "." in symbol or "-" in symbol:
+                continue
+
+            symbols.append(symbol)
+
+        symbols = sorted(list(set(symbols)))
+
+        print(f"Top mover gainers loaded: {len(symbols)} symbols")
+        return symbols
+
+    except Exception as e:
+        print("Movers fetch error:", str(e))
         return []
-
-    assets = response.json()
-    symbols = []
-
-    allowed_exchanges = {"NASDAQ", "NYSE", "AMEX", "ARCA", "BATS"}
-
-    for asset in assets:
-        symbol = asset.get("symbol")
-        exchange = asset.get("exchange")
-        tradable = asset.get("tradable")
-        status = asset.get("status")
-
-        if not symbol:
-            continue
-
-        # 🔥 FILTER BAD SYMBOL TYPES (FIXED LOCATION)
-        if symbol.endswith("U") or symbol.endswith("W") or symbol.endswith("R"):
-            continue
-
-        if "/" in symbol or "." in symbol or "-" in symbol:
-            continue
-
-        if status != "active":
-            continue
-
-        if not tradable:
-            continue
-
-        if exchange not in allowed_exchanges:
-            continue
-
-        symbols.append(symbol)
-
-    symbols = sorted(list(set(symbols)))
-    print(f"Tradable scan universe loaded: {len(symbols)} symbols")
-
-    return symbols[:MAX_SYMBOLS_TO_SCAN]
 
 
 def chunk_list(items, size):
@@ -155,9 +143,13 @@ def classify_stock(symbol, snap):
     score = 0
     reasons = []
 
+    # Strict documentation-aligned criteria:
+    # price $1-$20, already moving, high volume, tradable spread.
     price_ok = 1 <= price <= 20
     momentum_ok = percent_change >= 10
+    strong_momentum = percent_change >= 20
     volume_ok = volume >= 1_000_000
+    watch_volume_ok = volume >= 250_000
     spread_ok = spread_pct is None or spread_pct <= 1.5
 
     if price_ok:
@@ -166,29 +158,26 @@ def classify_stock(symbol, snap):
     else:
         reasons.append("price_outside_range")
 
-    if percent_change >= 20:
+    if strong_momentum:
         score += 40
         reasons.append("gap_20_plus")
-    elif percent_change >= 10:
+    elif momentum_ok:
         score += 30
         reasons.append("gap_10_plus")
-    elif percent_change >= 5:
-        score += 15
-        reasons.append("gap_5_plus")
     else:
-        reasons.append("weak_gap")
+        reasons.append("below_10_percent_reject")
 
     if volume >= 5_000_000:
         score += 25
         reasons.append("very_high_volume")
-    elif volume >= 1_000_000:
+    elif volume_ok:
         score += 20
         reasons.append("high_volume")
-    elif volume >= 250_000:
+    elif watch_volume_ok:
         score += 10
         reasons.append("moderate_volume")
     else:
-        reasons.append("low_volume")
+        reasons.append("low_volume_reject")
 
     if spread_pct is not None:
         if spread_pct <= 0.5:
@@ -198,23 +187,29 @@ def classify_stock(symbol, snap):
             score += 5
             reasons.append("acceptable_spread")
         else:
-            score -= 20
-            reasons.append("wide_spread")
+            score -= 25
+            reasons.append("wide_spread_reject")
+    else:
+        reasons.append("spread_unknown")
 
     passed_core_filter = price_ok and momentum_ok and volume_ok and spread_ok
 
+    # A_SETUP = strict A-quality candidate.
     if passed_core_filter and score >= 75:
         scanner_tier = "A_SETUP"
+
+    # WATCH = still strict, but not full A.
     elif (
-        score >= 60
-        and volume >= 500_000
-        and percent_change >= 10
+        price_ok
+        and momentum_ok
+        and watch_volume_ok
         and spread_ok
+        and score >= 60
     ):
         scanner_tier = "WATCH"
+
     else:
         scanner_tier = "REJECT"
-
 
     return {
         "symbol": symbol,
@@ -231,13 +226,14 @@ def classify_stock(symbol, snap):
 
 
 def get_market_movers():
-    symbols = get_tradable_symbols()
+    symbols = get_top_mover_symbols()
 
     if not symbols:
-        print("No symbols loaded.")
+        print("No mover symbols loaded.")
         return []
 
     snapshots = get_snapshots_for_symbols(symbols)
+
     results = []
 
     for symbol, snap in snapshots.items():
@@ -248,8 +244,6 @@ def get_market_movers():
 
         if classified["scanner_tier"] in ["A_SETUP", "WATCH"]:
             results.append(classified)
-            
-
 
     results.sort(
         key=lambda x: (
@@ -277,18 +271,17 @@ def save_watchlist(rows):
 
 
 def main():
-    print("Trading War Room REAL scanner started.")
+    print("Trading War Room MOVERS scanner started.")
     print(f"Mode: {TRADING_MODE}")
     print(f"Scan interval: {SCAN_INTERVAL}s")
-    print(f"Max symbols scanned: {MAX_SYMBOLS_TO_SCAN}")
-    print(f"Trading API: {ALPACA_TRADING_BASE_URL}")
+    print(f"Movers top: {MOVERS_TOP}")
     print(f"Data API: {ALPACA_DATA_BASE_URL}")
 
     while True:
         try:
             movers = get_market_movers()
 
-            print("\n===== REAL SCANNER OUTPUT =====")
+            print("\n===== MOVERS SCANNER OUTPUT =====")
 
             if not movers:
                 print("No A_SETUP or WATCH candidates found.")
