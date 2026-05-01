@@ -206,9 +206,9 @@ def classify_stock(symbol, snap):
     if passed_core_filter and score >= 75:
         scanner_tier = "A_SETUP"
     elif score >= 55 and volume >= 250_000:
-    scanner_tier = "WATCH"
+        scanner_tier = "WATCH"
     else:
-    scanner_tier = "REJECT"
+        scanner_tier = "REJECT"
 
 
     return {
