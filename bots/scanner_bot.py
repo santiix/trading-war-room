@@ -1,18 +1,18 @@
 import os
 import time
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
 from alpaca.data.historical.news import NewsClient
+from alpaca.data.requests import NewsRequest
 
 load_dotenv()
 
-# ── ENV ────────────────────────────────────────────────────────────────────────
+# ── CONFIG ─────────────────────────────────────────────────────────────────────
 SCAN_INTERVAL       = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
-FAST_WATCH_INTERVAL = int(os.getenv("FAST_WATCH_INTERVAL_SECONDS", "20"))
 TRADING_MODE        = os.getenv("TRADING_MODE", "paper")
 
 SUPABASE_URL             = os.getenv("SUPABASE_URL")
@@ -21,24 +21,20 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
-ALPACA_DATA_BASE_URL = os.getenv(
-    "ALPACA_DATA_BASE_URL",
-    "https://data.alpaca.markets"
-).rstrip("/")
+ALPACA_DATA_BASE_URL = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets").rstrip("/")
 
 MOVERS_TOP = int(os.getenv("MOVERS_TOP", "50"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
 
-# ── HARD FILTER CONSTANTS (Warrior Trading) ───────────────────────────────────
+# Warrior Trading Hard Filters
 MIN_PRICE          = 1.00
 MAX_PRICE          = 20.00
 MIN_PERCENT_CHANGE = 10.0
-PREF_PERCENT_CHANGE = 20.0
 MIN_VOLUME         = 1_000_000
 WATCH_MIN_VOLUME   = 250_000
 MIN_REL_VOLUME     = 5.0
 MAX_SPREAD_PCT     = 1.5
-MAX_FLOAT          = 20_000_000
+MAX_FLOAT          = 20_000_000   # not strictly enforced in snapshot, but kept for future
 MAX_SYMBOL_LENGTH  = 5
 
 ET = ZoneInfo("America/New_York")
@@ -56,9 +52,7 @@ def alpaca_headers():
 
 
 def is_tradeable_symbol(symbol: str) -> bool:
-    if not symbol:
-        return False
-    if len(symbol) > MAX_SYMBOL_LENGTH:
+    if not symbol or len(symbol) > MAX_SYMBOL_LENGTH:
         return False
     if symbol.endswith(("U", "W", "R")):
         return False
@@ -68,16 +62,21 @@ def is_tradeable_symbol(symbol: str) -> bool:
 
 
 def has_recent_news(symbol: str) -> bool:
-    """Warrior Trading requirement: must have a news catalyst today"""
+    """Check for news catalyst today (required for A_SETUP)"""
     try:
         start_time = datetime.now(ET).replace(hour=4, minute=0, second=0, microsecond=0)
-        news_response = news_client.get_news(symbols=symbol, start=start_time)
+
+        request = NewsRequest(
+            symbols=symbol,
+            start=start_time,
+            limit=5
+        )
+
+        news_response = news_client.get_news(request)
         news_list = news_response.get("news", []) if isinstance(news_response, dict) else news_response
+
         has_news = len(news_list) > 0
-        if has_news:
-            print(f"[NEWS] ✅ {symbol} has news")
-        else:
-            print(f"[NEWS] ❌ {symbol} has no news")
+        print(f"[NEWS] {'✅' if has_news else '❌'} {symbol} {'has news' if has_news else 'no news'}")
         return has_news
     except Exception as e:
         print(f"[NEWS ERROR] {symbol}: {e}")
@@ -93,15 +92,9 @@ def get_top_mover_symbols() -> list[str]:
             params={"top": MOVERS_TOP},
             timeout=30,
         )
-        if resp.status_code != 200:
-            print(f"[MOVERS] Error {resp.status_code}")
-            return []
-
+        resp.raise_for_status()
         gainers = resp.json().get("gainers") or []
-        symbols = [
-            g["symbol"] for g in gainers
-            if g.get("symbol") and is_tradeable_symbol(g["symbol"])
-        ]
+        symbols = [g["symbol"] for g in gainers if g.get("symbol") and is_tradeable_symbol(g["symbol"])]
         symbols = sorted(set(symbols))
         print(f"[MOVERS] {len(symbols)} clean gainer symbols loaded.")
         return symbols
@@ -126,8 +119,7 @@ def get_snapshots(symbols: list[str]) -> dict:
                 params={"symbols": ",".join(batch)},
                 timeout=30,
             )
-            if resp.status_code != 200:
-                continue
+            resp.raise_for_status()
             all_snaps.update(resp.json() or {})
             time.sleep(0.25)
         except Exception as e:
@@ -136,7 +128,9 @@ def get_snapshots(symbols: list[str]) -> dict:
 
 
 def get_relative_volume(symbol: str, current_volume: int) -> float | None:
+    # Your original RVOL logic (kept exactly the same)
     try:
+        from datetime import timedelta, timezone
         end = datetime.now(timezone.utc).date()
         start = end - timedelta(days=40)
 
@@ -152,9 +146,7 @@ def get_relative_volume(symbol: str, current_volume: int) -> float | None:
             },
             timeout=15,
         )
-        if resp.status_code != 200:
-            return None
-
+        resp.raise_for_status()
         bars = resp.json().get("bars") or []
         if len(bars) < 5:
             return None
@@ -192,11 +184,8 @@ def classify_stock(symbol: str, snap: dict) -> dict | None:
         return None
 
     percent_change = ((price - prev_close) / prev_close) * 100
-    spread_pct = None
-    if bid and ask and ask > bid:
-        spread_pct = ((ask - bid) / price) * 100
+    spread_pct = ((ask - bid) / price) * 100 if bid and ask and ask > bid else None
 
-    # Hard Warrior gates
     if not (MIN_PRICE <= price <= MAX_PRICE):
         return None
     if percent_change < MIN_PERCENT_CHANGE:
@@ -210,9 +199,8 @@ def classify_stock(symbol: str, snap: dict) -> dict | None:
     if rel_vol is None or rel_vol < MIN_REL_VOLUME:
         return None
 
-    # ── NEWS CHECK (Warrior catalyst requirement) ─────────────────────────────
+    # === NEWS CATALYST CHECK (Warrior requirement) ===
     has_news = has_recent_news(symbol)
-
     scanner_tier = "A_SETUP" if has_news else "WATCH"
 
     return {
@@ -254,9 +242,9 @@ def run_scanner():
         print("[SCANNER] No candidates passed filters.")
         return
 
-    print(f"[SCANNER] Found {len(candidates)} candidates (A_SETUP requires news)")
+    print(f"[SCANNER] Found {len(candidates)} candidates (A_SETUP = has news)")
 
-    # Upsert to bot_watchlist
+    # Upsert to your existing table
     supabase.table("bot_watchlist").upsert(candidates, on_conflict="symbol").execute()
     print(f"[DB] Upserted {len(candidates)} watchlist rows.")
 
