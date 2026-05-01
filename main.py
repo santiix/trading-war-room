@@ -12,8 +12,15 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+ALPACA_TRADING_BASE_URL = os.getenv(
+    "ALPACA_TRADING_BASE_URL",
+    "https://paper-api.alpaca.markets"
+).rstrip("/")
 
+ALPACA_DATA_BASE_URL = os.getenv(
+    "ALPACA_DATA_BASE_URL",
+    "https://data.alpaca.markets"
+).rstrip("/")
 MAX_SYMBOLS_TO_SCAN = int(os.getenv("MAX_SYMBOLS_TO_SCAN", "800"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
 
