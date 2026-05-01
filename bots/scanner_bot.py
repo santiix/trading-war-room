@@ -34,7 +34,6 @@ MIN_VOLUME         = 1_000_000
 WATCH_MIN_VOLUME   = 250_000
 MIN_REL_VOLUME     = 5.0
 MAX_SPREAD_PCT     = 1.5
-MAX_FLOAT          = 20_000_000   # not strictly enforced in snapshot, but kept for future
 MAX_SYMBOL_LENGTH  = 5
 
 ET = ZoneInfo("America/New_York")
@@ -73,8 +72,10 @@ def has_recent_news(symbol: str) -> bool:
         )
 
         news_response = news_client.get_news(request)
-        news_list = news_response.get("news", []) if isinstance(news_response, dict) else news_response
-
+        
+        # Fix: NewsSet is iterable, not a dict
+        news_list = list(news_response)
+        
         has_news = len(news_list) > 0
         print(f"[NEWS] {'✅' if has_news else '❌'} {symbol} {'has news' if has_news else 'no news'}")
         return has_news
@@ -128,7 +129,6 @@ def get_snapshots(symbols: list[str]) -> dict:
 
 
 def get_relative_volume(symbol: str, current_volume: int) -> float | None:
-    # Your original RVOL logic (kept exactly the same)
     try:
         from datetime import timedelta, timezone
         end = datetime.now(timezone.utc).date()
