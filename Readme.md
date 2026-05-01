@@ -127,9 +127,9 @@ real traders involved
 👉 This is a hard requirement
 
 🗄️ DATABASE (SUPABASE)
-Table: bot_watchlist
-create table bot_watchlist (
-  symbol text primary key,
+create table public.bot_watchlist (
+  id uuid primary key default gen_random_uuid(),
+  symbol text not null,
   price numeric,
   prev_close numeric,
   percent_change numeric,
@@ -138,9 +138,13 @@ create table bot_watchlist (
   spread_pct numeric,
   scanner_tier text,
   reason text,
-  trading_mode text,
+  passed_core_filter boolean default false,
+  trading_mode text default 'paper',
+  created_at timestamptz default now(),
   scanned_at timestamptz
 );
+
+
 ⚙️ ENV VARIABLES
 ALPACA_API_KEY=
 ALPACA_SECRET_KEY=
