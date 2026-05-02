@@ -19,9 +19,7 @@ OVERSEER_INTERVAL = int(os.getenv("OVERSEER_INTERVAL", 30))
 
 DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", -100.0))
 MAX_CONSECUTIVE_LOSERS = int(os.getenv("MAX_CONSECUTIVE_LOSERS", 3))
-
-# Market regime settings (Ross "be present" rule)
-MIN_VIX_FOR_TRADING = float(os.getenv("MIN_VIX_FOR_TRADING", 15.0))   # only trade when VIX is decent
+MIN_VIX_FOR_TRADING = float(os.getenv("MIN_VIX_FOR_TRADING", 15.0))
 
 ET = ZoneInfo("America/New_York")
 
@@ -59,14 +57,13 @@ def get_consecutive_losers():
     return streak
 
 def get_current_vix():
-    """Simple market regime check using VIX"""
     try:
         req = StockLatestQuoteRequest(symbol_or_symbols="VIX")
         quotes = alpaca_data.get_stock_latest_quote(req)
         quote = quotes.get("VIX")
         return float(quote.ask_price) if quote and quote.ask_price else 15.0
     except:
-        return 15.0   # default safe
+        return 15.0
 
 def update_control_status(enabled: bool, status: str, reason: str = None):
     supabase.table("bot_control").update({
@@ -88,7 +85,6 @@ def run_overseer():
 
     print(f"[OVERSEER] PnL Today: ${today_pnl:.2f} | Consec Losers: {consec_losers} | VIX: {vix:.1f}")
 
-    # === WARRIOR RULES ===
     if today_pnl <= DAILY_LOSS_LIMIT:
         update_control_status(False, "HALTED", "DAILY_LOSS_LIMIT_HIT")
         print("🚨 TRADING HALTED — Daily loss limit reached")
@@ -99,7 +95,6 @@ def run_overseer():
         print("🚨 TRADING HALTED — 3 consecutive losers")
         return
 
-    # Market Regime Check (Ross "be present" rule)
     if vix < MIN_VIX_FOR_TRADING:
         update_control_status(False, "PAUSED", f"Low volatility (VIX {vix:.1f})")
         print(f"⏸️  OVERSEER PAUSED — Market too quiet (VIX {vix:.1f})")
@@ -118,7 +113,7 @@ def run_overseer():
 
 
 def main():
-    print("🚀 Warrior Trading Overseer Bot started (100% compliant)\n")
+    print("🚀 Warrior Trading Overseer Bot started (Final Polished Version)\n")
     while True:
         try:
             run_overseer()
