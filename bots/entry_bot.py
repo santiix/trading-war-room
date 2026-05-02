@@ -74,8 +74,8 @@ def get_current_price(symbol):
         return None
 
 
-def is_first_new_high_candle(symbol, current_price):
-    """Prioritizes the exact pattern from your image: first candle making a new high"""
+def is_first_new_high_candle(symbol):
+    """Exact pattern from your image: first candle that makes a new high"""
     try:
         start = datetime.now(ET).replace(hour=9, minute=30, second=0, microsecond=0)
         request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start, limit=120)
@@ -87,14 +87,14 @@ def is_first_new_high_candle(symbol, current_price):
         # Find premarket high
         pm_high = max(float(bar.high) for bar in bars if bar.timestamp.astimezone(ET).time() < dt_time(9, 30))
 
-        # Check last few candles for the first new high break
-        recent_bars = bars[-12:]
+        # Look for the first candle that breaks and closes above previous high
+        recent_bars = bars[-15:]
         for i in range(1, len(recent_bars)):
             prev_high = float(recent_bars[i-1].high)
-            current_high = float(recent_bars[i].high)
-            current_close = float(recent_bars[i].close)
+            curr_high = float(recent_bars[i].high)
+            curr_close = float(recent_bars[i].close)
 
-            if current_high > pm_high and current_close > prev_high:
+            if curr_high > pm_high and curr_close > prev_high:
                 return True
         return False
     except Exception as e:
@@ -111,7 +111,7 @@ def build_trade(row):
         return None
 
     # === PRIORITIZE THE EXACT PATTERN FROM YOUR IMAGE ===
-    if is_first_new_high_candle(symbol, current_price):
+    if is_first_new_high_candle(symbol):
         entry_reason = "FIRST_NEW_HIGH_CANDLE"
     else:
         entry_reason = "PREMARKET_HIGH_BREAKOUT_OR_PULLBACK"
@@ -141,7 +141,7 @@ def build_trade(row):
 
     target_price = round(current_price + (risk_per_share * 2), 4)
 
-    # Read news headline for better logging
+    # Read news headline for logging
     news_headline = row.get("news_headline") or "No headline"
 
     return {
@@ -226,7 +226,7 @@ def run_entry_bot():
 
 
 def main():
-    print("🚀 Warrior Trading Entry Bot started (100% compliant + first new high priority)\n")
+    print("🚀 Warrior Trading Entry Bot started (Final Polished Version)\n")
     while True:
         try:
             run_entry_bot()
