@@ -68,46 +68,38 @@ def get_current_price(symbol):
         req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
         quotes = data_client.get_stock_latest_quote(req)
         quote = quotes.get(symbol)
-        if quote and quote.ask_price:
-            return round(float(quote.ask_price), 4)
-        return None
+        return round(float(quote.ask_price), 4) if quote and quote.ask_price else None
     except Exception as e:
         print(f"[PRICE ERROR] {symbol}: {e}")
         return None
 
 
-def is_first_new_high_breakout(symbol, current_price):
+def is_first_new_high_candle(symbol, current_price):
     """Prioritizes the exact pattern from your image: first candle making a new high"""
     try:
         start = datetime.now(ET).replace(hour=9, minute=30, second=0, microsecond=0)
         request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start, limit=120)
         bars = data_client.get_stock_bars(request).data.get(symbol, [])
 
-        if len(bars) < 10:
+        if len(bars) < 15:
             return False
 
+        # Find premarket high
         pm_high = max(float(bar.high) for bar in bars if bar.timestamp.astimezone(ET).time() < dt_time(9, 30))
-        recent_bars = bars[-8:]  # last 8 minutes
 
-        # First candle that breaks and closes above previous high
+        # Check last few candles for the first new high break
+        recent_bars = bars[-12:]
         for i in range(1, len(recent_bars)):
-            if (float(recent_bars[i].high) > pm_high and 
-                float(recent_bars[i].close) > float(recent_bars[i-1].high)):
+            prev_high = float(recent_bars[i-1].high)
+            current_high = float(recent_bars[i].high)
+            current_close = float(recent_bars[i].close)
+
+            if current_high > pm_high and current_close > prev_high:
                 return True
         return False
-    except:
+    except Exception as e:
+        print(f"[PATTERN CHECK ERROR] {symbol}: {e}")
         return False
-
-
-def get_float_from_watchlist(watchlist_id):
-    """Re-check float at entry time"""
-    try:
-        resp = supabase.table("bot_watchlist").select("float").eq("id", watchlist_id).limit(1).execute()
-        if resp.data:
-            return int(resp.data[0].get("float") or 999_999_999)
-        return 999_999_999
-    except:
-        return 999_999_999
 
 
 def build_trade(row):
@@ -118,17 +110,21 @@ def build_trade(row):
     if not current_price:
         return None
 
-    # Prioritize the exact "first new high" pattern from your image
-    if is_first_new_high_breakout(symbol, current_price):
-        entry_reason = "FIRST_NEW_HIGH_BREAKOUT"
+    # === PRIORITIZE THE EXACT PATTERN FROM YOUR IMAGE ===
+    if is_first_new_high_candle(symbol, current_price):
+        entry_reason = "FIRST_NEW_HIGH_CANDLE"
     else:
         entry_reason = "PREMARKET_HIGH_BREAKOUT_OR_PULLBACK"
 
-    # Re-check float
-    float_shares = get_float_from_watchlist(watchlist_id)
-    if float_shares > 5_000_000:
-        print(f"[ENTRY] {symbol} float too high ({float_shares:,}) - skipping")
-        return None
+    # Re-check float at exact entry time
+    try:
+        float_resp = supabase.table("bot_watchlist").select("float").eq("id", watchlist_id).limit(1).execute()
+        float_shares = int(float_resp.data[0].get("float") or 999_999_999) if float_resp.data else 999_999_999
+        if float_shares > 5_000_000:
+            print(f"[ENTRY] {symbol} float too high ({float_shares:,}) — skipping")
+            return None
+    except:
+        pass
 
     # Warrior risk sizing
     stop_price = round(current_price * (1 - STOP_PERCENT), 4)
@@ -145,7 +141,7 @@ def build_trade(row):
 
     target_price = round(current_price + (risk_per_share * 2), 4)
 
-    # Read news headline for logging
+    # Read news headline for better logging
     news_headline = row.get("news_headline") or "No headline"
 
     return {
@@ -207,7 +203,6 @@ def run_entry_bot():
         if not trade:
             continue
 
-        # Save to bot_trades
         result = supabase.table("bot_trades").insert(trade).execute()
         trade_id = result.data[0]["id"]
 
@@ -227,7 +222,6 @@ def run_entry_bot():
             except Exception as e:
                 print(f"❌ ORDER FAILED {trade['symbol']}: {e}")
 
-        # Link back
         supabase.table("bot_validations").update({"trade_id": trade_id}).eq("id", row["id"]).execute()
 
 
