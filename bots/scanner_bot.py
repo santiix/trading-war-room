@@ -1,7 +1,7 @@
 import os
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -26,7 +26,7 @@ ALPACA_DATA_BASE_URL = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.ma
 MOVERS_TOP = int(os.getenv("MOVERS_TOP", "50"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))
 
-# ── WARRIOR TRADING SCANNER CRITERIA (EXACT FROM YOUR LATEST IMAGE) ─────────────
+# ── WARRIOR TRADING SCANNER CRITERIA ─────────────────────────────────────────
 MIN_PRICE          = 3.00
 MAX_PRICE          = 20.00
 MIN_PERCENT_CHANGE = 10.0
@@ -35,7 +35,7 @@ MIN_VOLUME         = 1_000_000
 WATCH_MIN_VOLUME   = 250_000
 MIN_REL_VOLUME     = 5.0
 MAX_SPREAD_PCT     = 1.5
-MAX_FLOAT          = 5_000_000   # < 5 million preferred for A_SETUP
+MAX_FLOAT          = 5_000_000
 
 ET = ZoneInfo("America/New_York")
 
@@ -62,7 +62,7 @@ def is_tradeable_symbol(symbol: str) -> bool:
 
 
 def has_recent_news(symbol: str) -> str | None:
-    """Returns headline if news exists, else None"""
+    """Returns headline if news exists today, else None"""
     try:
         start_time = datetime.now(ET).replace(hour=4, minute=0, second=0, microsecond=0)
         request = NewsRequest(symbols=symbol, start=start_time, limit=3)
@@ -70,7 +70,7 @@ def has_recent_news(symbol: str) -> str | None:
         news_list = list(news_response)
 
         if news_list:
-            headline = news_list[0].headline[:200]  # truncate for DB
+            headline = news_list[0].headline[:200]
             print(f"[NEWS] ✅ {symbol} → {headline}")
             return headline
         else:
@@ -118,10 +118,10 @@ def get_snapshots(symbols: list[str]) -> dict:
 
 
 def get_relative_volume(symbol: str, current_volume: int) -> float | None:
-    """Exact 30-day average volume method (Ross preferred)"""
+    """30-day average volume method — FIX: timedelta now properly imported"""
     try:
         end = datetime.now(ET).date()
-        start = end - timedelta(days=40)
+        start = end - timedelta(days=40)  # ✅ FIXED: timedelta now imported
 
         resp = requests.get(
             f"{ALPACA_DATA_BASE_URL}/v2/stocks/{symbol}/bars",
@@ -183,7 +183,7 @@ def classify_stock(symbol: str, snap: dict) -> dict | None:
     if rel_vol is None or rel_vol < MIN_REL_VOLUME:
         return None
 
-    # === NEWS & FLOAT CHECK ===
+    # News & float check
     news_headline = has_recent_news(symbol)
     has_news = news_headline is not None
 
@@ -229,14 +229,14 @@ def run_scanner():
         print("[SCANNER] No candidates passed filters.")
         return
 
-    print(f"[SCANNER] Found {len(candidates)} candidates (A_SETUP = has news + float check)")
+    print(f"[SCANNER] Found {len(candidates)} candidates (A_SETUP = has news)")
 
     supabase.table("bot_watchlist").upsert(candidates, on_conflict="symbol").execute()
-    print(f"[DB] Upserted {len(candidates)} watchlist rows (with news headlines).")
+    print(f"[DB] Upserted {len(candidates)} watchlist rows.")
 
 
 def main():
-    print("🚀 Scanner Bot (100% Warrior Trading + News + Float) started\n")
+    print("🚀 Scanner Bot (100% Warrior Trading + News) started\n")
     while True:
         try:
             run_scanner()
