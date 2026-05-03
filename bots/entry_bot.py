@@ -75,20 +75,35 @@ def get_current_price(symbol):
 
 
 def is_first_new_high_candle(symbol):
-    """Exact pattern from your image: first candle that makes a new high"""
+    """
+    Checks for first candle that makes a new high above premarket high.
+    FIX: Bar request now starts at 4:00 AM to include premarket bars,
+    and guards against empty premarket bar list before calling max().
+    """
     try:
-        start = datetime.now(ET).replace(hour=9, minute=30, second=0, microsecond=0)
-        request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start, limit=120)
+        # ✅ FIXED: Start at 4:00 AM so we capture premarket bars
+        start = datetime.now(ET).replace(hour=4, minute=0, second=0, microsecond=0)
+        request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start, limit=500)
         bars = data_client.get_stock_bars(request).data.get(symbol, [])
 
         if len(bars) < 15:
             return False
 
-        # Find premarket high
-        pm_high = max(float(bar.high) for bar in bars if bar.timestamp.astimezone(ET).time() < dt_time(9, 30))
+        # ✅ FIXED: Guard against empty premarket bar list before calling max()
+        pm_bars = [bar for bar in bars if bar.timestamp.astimezone(ET).time() < dt_time(9, 30)]
+        if not pm_bars:
+            print(f"[PATTERN] {symbol} — no premarket bars found, skipping pattern check")
+            return False
 
-        # Look for the first candle that breaks and closes above previous high
-        recent_bars = bars[-15:]
+        pm_high = max(float(bar.high) for bar in pm_bars)
+
+        # Market open bars only
+        market_bars = [bar for bar in bars if bar.timestamp.astimezone(ET).time() >= dt_time(9, 30)]
+        if len(market_bars) < 2:
+            return False
+
+        # Look for first candle that breaks and closes above premarket high
+        recent_bars = market_bars[-15:]
         for i in range(1, len(recent_bars)):
             prev_high = float(recent_bars[i-1].high)
             curr_high = float(recent_bars[i].high)
@@ -96,6 +111,7 @@ def is_first_new_high_candle(symbol):
 
             if curr_high > pm_high and curr_close > prev_high:
                 return True
+
         return False
     except Exception as e:
         print(f"[PATTERN CHECK ERROR] {symbol}: {e}")
@@ -110,13 +126,13 @@ def build_trade(row):
     if not current_price:
         return None
 
-    # === PRIORITIZE THE EXACT PATTERN FROM YOUR IMAGE ===
+    # Pattern check
     if is_first_new_high_candle(symbol):
         entry_reason = "FIRST_NEW_HIGH_CANDLE"
     else:
         entry_reason = "PREMARKET_HIGH_BREAKOUT_OR_PULLBACK"
 
-    # Re-check float at exact entry time
+    # Float check at entry time
     try:
         float_resp = supabase.table("bot_watchlist").select("float").eq("id", watchlist_id).limit(1).execute()
         float_shares = int(float_resp.data[0].get("float") or 999_999_999) if float_resp.data else 999_999_999
@@ -141,7 +157,6 @@ def build_trade(row):
 
     target_price = round(current_price + (risk_per_share * 2), 4)
 
-    # Read news headline for logging
     news_headline = row.get("news_headline") or "No headline"
 
     return {
@@ -226,7 +241,7 @@ def run_entry_bot():
 
 
 def main():
-    print("🚀 Warrior Trading Entry Bot started (Final Polished Version)\n")
+    print("🚀 Warrior Trading Entry Bot started (Fixed + Final)\n")
     while True:
         try:
             run_entry_bot()
