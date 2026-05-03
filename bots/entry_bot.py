@@ -15,22 +15,20 @@ from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
 
 load_dotenv()
 
-# ====================== WARRIOR TRADING CONFIG ======================
+# ====================== CONFIG ======================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 ENTRY_INTERVAL = int(os.getenv("ENTRY_INTERVAL", 10))
 
-RISK_DOLLARS = float(os.getenv("RISK_DOLLARS", 50))
-MAX_TRADE_DOLLARS = float(os.getenv("MAX_TRADE_DOLLARS", 1000))
+RISK_DOLLARS = float(os.getenv("RISK_DOLLARS", 25))
+MAX_TRADE_DOLLARS = float(os.getenv("MAX_TRADE_DOLLARS", 500))
 STOP_PERCENT = float(os.getenv("STOP_PERCENT", 5)) / 100
 
 MIN_VALIDATOR_SCORE = int(os.getenv("MIN_VALIDATOR_SCORE", 75))
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", 3))
 
-ENTRY_WINDOW_START = os.getenv("ENTRY_WINDOW_START", "09:30")
-ENTRY_WINDOW_END = os.getenv("ENTRY_WINDOW_END", "10:00")
 ENABLE_ALPACA_ORDERS = os.getenv("ENABLE_ALPACA_ORDERS", "false").lower() == "true"
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -39,9 +37,19 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ET = ZoneInfo("America/New_York")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-data_client = StockHistoricalDataClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
-trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=(TRADING_MODE == "paper"))
+
+data_client = StockHistoricalDataClient(
+    api_key=ALPACA_API_KEY,
+    secret_key=ALPACA_SECRET_KEY
+)
+
+trading_client = TradingClient(
+    ALPACA_API_KEY,
+    ALPACA_SECRET_KEY,
+    paper=(TRADING_MODE == "paper")
+)
 # ===================================================
+
 
 def is_entry_window_open():
     current = datetime.now(ET).time()
@@ -52,15 +60,61 @@ def is_entry_window_open():
 
 def trading_enabled():
     try:
-        resp = supabase.table("bot_control").select("is_enabled").eq("trading_mode", TRADING_MODE).limit(1).execute()
-        return resp.data and resp.data[0].get("is_enabled", True)
-    except:
+        resp = (
+            supabase.table("bot_control")
+            .select("is_enabled,status,reason")
+            .eq("trading_mode", TRADING_MODE)
+            .limit(1)
+            .execute()
+        )
+
+        if not resp.data:
+            print("[ENTRY] No bot_control row found — allowing trading by default.")
+            return True
+
+        row = resp.data[0]
+        enabled = row.get("is_enabled", True)
+
+        if not enabled:
+            print(f"[ENTRY] Trading disabled by overseer. Status={row.get('status')} Reason={row.get('reason')}")
+
+        return enabled
+
+    except Exception as e:
+        print(f"[ENTRY] bot_control check failed — allowing trading. Error: {e}")
         return True
 
 
 def count_open_trades():
-    resp = supabase.table("bot_trades").select("id", count="exact").eq("trade_status", "OPEN").eq("trading_mode", TRADING_MODE).execute()
-    return resp.count or 0
+    try:
+        resp = (
+            supabase.table("bot_trades")
+            .select("id", count="exact")
+            .eq("trade_status", "OPEN")
+            .eq("trading_mode", TRADING_MODE)
+            .execute()
+        )
+        return resp.count or 0
+    except Exception as e:
+        print(f"[ENTRY] Could not count open trades: {e}")
+        return 0
+
+
+def already_open_symbol(symbol):
+    try:
+        resp = (
+            supabase.table("bot_trades")
+            .select("id")
+            .eq("symbol", symbol)
+            .eq("trade_status", "OPEN")
+            .eq("trading_mode", TRADING_MODE)
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data)
+    except Exception as e:
+        print(f"[ENTRY] Could not check open symbol {symbol}: {e}")
+        return False
 
 
 def get_current_price(symbol):
@@ -68,44 +122,60 @@ def get_current_price(symbol):
         req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
         quotes = data_client.get_stock_latest_quote(req)
         quote = quotes.get(symbol)
-        return round(float(quote.ask_price), 4) if quote and quote.ask_price else None
+
+        if quote and quote.ask_price:
+            return round(float(quote.ask_price), 4)
+
+        if quote and quote.bid_price:
+            return round(float(quote.bid_price), 4)
+
+        print(f"[PRICE] No quote price found for {symbol}")
+        return None
+
     except Exception as e:
         print(f"[PRICE ERROR] {symbol}: {e}")
         return None
 
 
 def is_first_new_high_candle(symbol):
-    """
-    Checks for first candle that makes a new high above premarket high.
-    FIX: Bar request now starts at 4:00 AM to include premarket bars,
-    and guards against empty premarket bar list before calling max().
-    """
     try:
-        # ✅ FIXED: Start at 4:00 AM so we capture premarket bars
         start = datetime.now(ET).replace(hour=4, minute=0, second=0, microsecond=0)
-        request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start, limit=500)
+
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Minute,
+            start=start,
+            limit=500
+        )
+
         bars = data_client.get_stock_bars(request).data.get(symbol, [])
 
         if len(bars) < 15:
             return False
 
-        # ✅ FIXED: Guard against empty premarket bar list before calling max()
-        pm_bars = [bar for bar in bars if bar.timestamp.astimezone(ET).time() < dt_time(9, 30)]
+        pm_bars = [
+            bar for bar in bars
+            if bar.timestamp.astimezone(ET).time() < dt_time(9, 30)
+        ]
+
         if not pm_bars:
-            print(f"[PATTERN] {symbol} — no premarket bars found, skipping pattern check")
+            print(f"[PATTERN] {symbol} — no premarket bars found.")
             return False
 
         pm_high = max(float(bar.high) for bar in pm_bars)
 
-        # Market open bars only
-        market_bars = [bar for bar in bars if bar.timestamp.astimezone(ET).time() >= dt_time(9, 30)]
+        market_bars = [
+            bar for bar in bars
+            if bar.timestamp.astimezone(ET).time() >= dt_time(9, 30)
+        ]
+
         if len(market_bars) < 2:
             return False
 
-        # Look for first candle that breaks and closes above premarket high
         recent_bars = market_bars[-15:]
+
         for i in range(1, len(recent_bars)):
-            prev_high = float(recent_bars[i-1].high)
+            prev_high = float(recent_bars[i - 1].high)
             curr_high = float(recent_bars[i].high)
             curr_close = float(recent_bars[i].close)
 
@@ -113,6 +183,7 @@ def is_first_new_high_candle(symbol):
                 return True
 
         return False
+
     except Exception as e:
         print(f"[PATTERN CHECK ERROR] {symbol}: {e}")
         return False
@@ -122,37 +193,32 @@ def build_trade(row):
     symbol = row["symbol"]
     watchlist_id = row.get("watchlist_id")
 
+    if already_open_symbol(symbol):
+        print(f"[ENTRY] {symbol} already has an open trade — skipping.")
+        return None
+
     current_price = get_current_price(symbol)
     if not current_price:
         return None
 
-    # Pattern check
     if is_first_new_high_candle(symbol):
         entry_reason = "FIRST_NEW_HIGH_CANDLE"
     else:
         entry_reason = "PREMARKET_HIGH_BREAKOUT_OR_PULLBACK"
 
-    # Float check at entry time
-    try:
-        float_resp = supabase.table("bot_watchlist").select("float").eq("id", watchlist_id).limit(1).execute()
-        float_shares = int(float_resp.data[0].get("float") or 999_999_999) if float_resp.data else 999_999_999
-        if float_shares > 5_000_000:
-            print(f"[ENTRY] {symbol} float too high ({float_shares:,}) — skipping")
-            return None
-    except:
-        pass
-
-    # Warrior risk sizing
     stop_price = round(current_price * (1 - STOP_PERCENT), 4)
-    risk_per_share = current_price - stop_price
+    risk_per_share = round(current_price - stop_price, 4)
+
     if risk_per_share <= 0:
+        print(f"[ENTRY] {symbol} invalid risk per share.")
         return None
 
-    shares = min(
-        math.floor(RISK_DOLLARS / risk_per_share),
-        math.floor(MAX_TRADE_DOLLARS / current_price)
-    )
+    shares_by_risk = math.floor(RISK_DOLLARS / risk_per_share)
+    shares_by_cap = math.floor(MAX_TRADE_DOLLARS / current_price)
+    shares = min(shares_by_risk, shares_by_cap)
+
     if shares < 1:
+        print(f"[ENTRY] {symbol} position too small — skipping.")
         return None
 
     target_price = round(current_price + (risk_per_share * 2), 4)
@@ -175,13 +241,82 @@ def build_trade(row):
         "validator_score": row.get("validator_score"),
         "entry_reason": f"{entry_reason} | {news_headline[:100]}",
         "trading_mode": TRADING_MODE,
-        "created_at": datetime.now(ET).isoformat()
+        "created_at": datetime.now(ET).isoformat(),
+        "opened_at": datetime.now(ET).isoformat()
     }
+
+
+def place_alpaca_order(trade):
+    if not ENABLE_ALPACA_ORDERS:
+        print(f"[ENTRY] Alpaca orders disabled. DB paper trade only for {trade['symbol']}.")
+        return None
+
+    try:
+        order_data = MarketOrderRequest(
+            symbol=trade["symbol"],
+            qty=trade["shares"],
+            side=OrderSide.BUY,
+            type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY
+        )
+
+        order = trading_client.submit_order(order_data)
+        order_id = getattr(order, "id", None)
+
+        print(f"✅ ALPACA PAPER ORDER PLACED → {trade['symbol']} {trade['shares']} shares | Order ID: {order_id}")
+        return str(order_id) if order_id else None
+
+    except Exception as e:
+        print(f"❌ ALPACA ORDER FAILED {trade['symbol']}: {e}")
+        return None
+
+
+def get_validated_setups():
+    try:
+        response = (
+            supabase.table("bot_validations")
+            .select("*, bot_watchlist!inner(news_headline)")
+            .eq("validator_status", "VALIDATED")
+            .eq("trading_mode", TRADING_MODE)
+            .gte("validator_score", MIN_VALIDATOR_SCORE)
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+
+        rows = response.data or []
+
+        # Your schema does NOT currently have bot_validations.trade_id.
+        # So we filter duplicates by checking bot_trades.validation_id instead.
+        clean_rows = []
+
+        for row in rows:
+            validation_id = row.get("id")
+
+            existing = (
+                supabase.table("bot_trades")
+                .select("id")
+                .eq("validation_id", validation_id)
+                .limit(1)
+                .execute()
+            )
+
+            if existing.data:
+                print(f"[ENTRY] Validation {validation_id} already has a trade — skipping.")
+                continue
+
+            clean_rows.append(row)
+
+        return clean_rows
+
+    except Exception as e:
+        print(f"[ENTRY] Failed to load validated setups: {e}")
+        return []
 
 
 def run_entry_bot():
     print("============================================================")
-    print("  Trading War Room — ENTRY BOT (100% Warrior Trading)")
+    print("  Trading War Room — ENTRY BOT")
     print(f"  Mode: {TRADING_MODE} | Window: 09:30-10:00 ET | Risk: ${RISK_DOLLARS}")
     print("============================================================")
 
@@ -190,63 +325,58 @@ def run_entry_bot():
         return
 
     if not trading_enabled():
-        print("[ENTRY] Overseer has disabled trading.")
         return
 
-    if count_open_trades() >= MAX_OPEN_TRADES:
-        print(f"[ENTRY] Max open trades ({MAX_OPEN_TRADES}) reached.")
+    open_count = count_open_trades()
+    if open_count >= MAX_OPEN_TRADES:
+        print(f"[ENTRY] Max open trades reached: {open_count}/{MAX_OPEN_TRADES}")
         return
 
-    response = (
-        supabase.table("bot_validations")
-        .select("*, bot_watchlist!inner(news_headline)")
-        .eq("validator_status", "VALIDATED")
-        .eq("trading_mode", TRADING_MODE)
-        .gte("validator_score", MIN_VALIDATOR_SCORE)
-        .order("created_at", desc=True)
-        .limit(10)
-        .execute()
-    )
+    rows = get_validated_setups()
 
-    rows = response.data or []
     if not rows:
-        print("[ENTRY] No validated setups found.")
+        print("[ENTRY] No validated setups ready.")
         return
 
-    for row in rows:
+    slots_remaining = MAX_OPEN_TRADES - open_count
+
+    for row in rows[:slots_remaining]:
         trade = build_trade(row)
+
         if not trade:
             continue
 
-        result = supabase.table("bot_trades").insert(trade).execute()
-        trade_id = result.data[0]["id"]
+        alpaca_order_id = place_alpaca_order(trade)
 
-        print(f"[ENTRY] ✅ {trade['symbol']} | {trade['entry_reason']} | Shares={trade['shares']} | Risk=${trade['risk_dollars']}")
+        if alpaca_order_id:
+            trade["alpaca_order_id"] = alpaca_order_id
 
-        if ENABLE_ALPACA_ORDERS:
-            try:
-                order_data = MarketOrderRequest(
-                    symbol=trade["symbol"],
-                    qty=trade["shares"],
-                    side=OrderSide.BUY,
-                    type=OrderType.MARKET,
-                    time_in_force=TimeInForce.DAY
+        try:
+            result = supabase.table("bot_trades").insert(trade).execute()
+
+            if result.data:
+                print(
+                    f"[ENTRY] ✅ TRADE OPENED: {trade['symbol']} | "
+                    f"Entry={trade['entry_price']} | Shares={trade['shares']} | "
+                    f"Risk=${trade['risk_dollars']} | Target={trade['target_price']}"
                 )
-                order = trading_client.submit_order(order_data)
-                print(f"✅ ALPACA ORDER PLACED → {trade['symbol']} {trade['shares']} shares")
-            except Exception as e:
-                print(f"❌ ORDER FAILED {trade['symbol']}: {e}")
+            else:
+                print(f"[ENTRY] Insert returned no data for {trade['symbol']}")
 
-        supabase.table("bot_validations").update({"trade_id": trade_id}).eq("id", row["id"]).execute()
+        except Exception as e:
+            print(f"[ENTRY] DB insert failed for {trade['symbol']}: {e}")
 
 
 def main():
-    print("🚀 Warrior Trading Entry Bot started (Fixed + Final)\n")
+    print("🚀 Entry Bot started — Monday Paper Ready\n")
+
     while True:
         try:
             run_entry_bot()
         except Exception as e:
-            print(f"[ERROR] {e}")
+            print(f"[ENTRY LOOP ERROR] {e}")
+
+        print(f"[LOOP] Sleeping {ENTRY_INTERVAL}s...\n")
         time.sleep(ENTRY_INTERVAL)
 
 
