@@ -72,7 +72,12 @@ def validate_candidate(row):
     volume = int(row.get("volume") or 0)
     tier = row.get("scanner_tier")
     news_headline = row.get("news_headline")
-    float_shares = int(row.get("float") or 999_999_999)
+    float_shares = row.get("float")
+    if float_shares:
+        float_shares = int(float_shares)
+        if float_shares <= 5_000_000:
+            score += 15
+            reasons.append(f"low float ({float_shares:,})")
 
     # Price & Momentum
     if 3.00 <= price <= 20.00: score += 15; reasons.append("price $3-20")
@@ -84,8 +89,9 @@ def validate_candidate(row):
     elif rel_vol >= 5: score += 15; reasons.append("strong RVOL")
 
     # News & Float
-    if news_headline: score += 10; reasons.append("news catalyst")
-    if float_shares <= 5_000_000: score += 15; reasons.append(f"low float ({float_shares:,})")
+    if news_headline:
+        score += 10
+        reasons.append("news catalyst")
 
     # Technicals
     premarket_bars = get_premarket_bars(symbol)
@@ -128,10 +134,14 @@ def validate_candidate(row):
         "validator_status": status,
         "validator_score": score,
         "reason": " | ".join(reasons),
+        
+        # core data
         "price": price,
         "percent_change": percent_change,
         "volume": volume,
         "rel_vol": rel_vol,
+        "spread_pct": row.get("spread_pct"),
+        "scanner_tier": tier,
         "trading_mode": TRADING_MODE,
         "created_at": datetime.now(ET).isoformat()
     }
